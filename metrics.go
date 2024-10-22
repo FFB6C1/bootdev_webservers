@@ -29,8 +29,3 @@ func (cfg *apiConfig) helperGetMetricsString() []byte {
 	`, cfg.fileServerHits.Load())
 	return []byte(metricsString)
 }
-
-func (cfg *apiConfig) resetHandler(writer http.ResponseWriter, _ *http.Request) {
-	cfg.fileServerHits.Store(0)
-	writer.Write([]byte("file server hits reset."))
-}
