@@ -5,6 +5,11 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/FFB6C1/bootdev_webservers/internal/auth"
+	"github.com/FFB6C1/bootdev_webservers/internal/database"
+	"github.com/google/uuid"
 )
 
 const badResponseError = `{
@@ -12,57 +17,112 @@ const badResponseError = `{
 }`
 
 type chirp struct {
-	Body string `json:"body"`
+	Body   string    `json:"body"`
+	UserId uuid.UUID `json:"user_id"`
 }
 
 type chirpResponse struct {
-	Error     string `json:"error"`
-	CleanBody string `json:"cleaned_body"`
+	Id        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserId    uuid.UUID `json:"user_id"`
 }
 
-func validateChirpHandler(writer http.ResponseWriter, request *http.Request) {
+func (cfg *apiConfig) postNewChirpHandler(writer http.ResponseWriter, request *http.Request) {
 	chirp := chirp{}
 	decoder := json.NewDecoder(request.Body)
 
 	if err := decoder.Decode(&chirp); err != nil {
 		log.Printf("Error decoding chirp: %s", err)
-		writer.WriteHeader(500)
-		response, err := makeChirpResponse("Error decoding chirp", "")
-		if err != nil {
-			log.Printf("Error writing response: %s", err)
-			writer.Write([]byte(badResponseError))
-			return
-		}
-		writer.Write(response)
+		handleError("Error decoding chirp", err, 500, writer)
 		return
 	}
 
+	token, err := auth.GetBearerToken(request.Header)
+	if err != nil {
+		handleError("Couldn't get token from header", nil, 401, writer)
+	}
+
+	tokenUUID, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		handleError("Unauthorized", err, 401, writer)
+	}
+
 	if !checkChirpLength(chirp.Body) {
-		response, err := makeChirpResponse("Chirp is too long", "")
-		if err != nil {
-			writer.WriteHeader(500)
-			log.Printf("Error writing response: %s", err)
-			writer.Write([]byte(badResponseError))
-			return
-		}
-		writer.WriteHeader(400)
-		writer.Write(response)
+		log.Printf("Chirp is too long.")
+		handleError("Error writing response", nil, 400, writer)
+
 		return
 	}
 
 	cleanBody := checkChirpProfanity(chirp.Body)
 
-	response, err := makeChirpResponse("", cleanBody)
+	chirpToAdd := database.CreateChirpParams{
+		Body:   cleanBody,
+		UserID: tokenUUID,
+	}
+
+	addedChirp, err := cfg.db.CreateChirp(request.Context(), chirpToAdd)
 	if err != nil {
-		writer.WriteHeader(500)
-		log.Printf("Error writing response: %s", err)
-		writer.Write([]byte(badResponseError))
+		log.Printf("Error creating chirp: %s", err)
+		handleError("Error creating chirp", err, 500, writer)
+		return
+	}
+
+	response, err := makeChirpJSON(addedChirp)
+	if err != nil {
+		log.Printf("Error creating response: %s", err)
+		handleError("Error creating response", err, 500, writer)
+		return
+	}
+
+	writer.WriteHeader(201)
+	writer.Write([]byte(response))
+	return
+}
+
+func (cfg *apiConfig) getChirpsHandler(writer http.ResponseWriter, request *http.Request) {
+	chirps, err := cfg.db.GetChirps(request.Context())
+	if err != nil {
+		handleError("Failed to get chirps", err, 500, writer)
 		return
 	}
 	writer.WriteHeader(200)
-	writer.Write(response)
-	return
+	jsonChirps := []string{}
+	for _, chirp := range chirps {
+		jsonChirp, err := makeChirpJSON(chirp)
+		if err != nil {
+			handleError("Failed to marshal chirp into json", err, 500, writer)
+			return
+		}
+		jsonChirps = append(jsonChirps, string(jsonChirp))
+	}
+	body := "[" + strings.Join(jsonChirps, ", ") + "]"
+	writer.Write([]byte(body))
+}
 
+func (cfg *apiConfig) getChirpByIdHandler(writer http.ResponseWriter, request *http.Request) {
+	id := request.PathValue("chirpID")
+	idUUID, err := uuid.Parse(id)
+	if err != nil {
+		handleError("Bad UUID", err, 400, writer)
+		return
+	}
+	chirp, err := cfg.db.GetChirpById(request.Context(), idUUID)
+	if err != nil {
+		handleError("Couldn't find chirp", err, 500, writer)
+		return
+	}
+
+	chirpJSON, err := makeChirpJSON(chirp)
+	if err != nil {
+		handleError("Couldn't marshal chirp into JSON", err, 500, writer)
+		return
+	}
+
+	writer.WriteHeader(200)
+	writer.Write(chirpJSON)
 }
 
 func checkChirpLength(text string) bool {
@@ -81,12 +141,15 @@ func checkChirpProfanity(text string) string {
 
 }
 
-func makeChirpResponse(errors string, cleanBody string) ([]byte, error) {
-	responseStruct := chirpResponse{
-		Error:     errors,
-		CleanBody: cleanBody,
+func makeChirpJSON(chirp database.Chirp) ([]byte, error) {
+	chirpJson := chirpResponse{
+		Id:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserId:    chirp.UserID,
 	}
-	responseJson, err := json.Marshal(responseStruct)
+	responseJson, err := json.Marshal(chirpJson)
 	if err != nil {
 		return []byte(""), err
 	}

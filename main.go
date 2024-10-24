@@ -16,12 +16,14 @@ type apiConfig struct {
 	fileServerHits atomic.Int32
 	db             *database.Queries
 	platform       string
+	secret         string
 }
 
 func main() {
 	godotenv.Load(".env")
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	secret := os.Getenv("SECRET")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatal("Could not open database:", err)
@@ -31,6 +33,7 @@ func main() {
 		fileServerHits: atomic.Int32{},
 		db:             dbQueries,
 		platform:       platform,
+		secret:         secret,
 	}
 	mux := http.NewServeMux()
 	handler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
@@ -39,8 +42,11 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", readinessHandler)
 	mux.HandleFunc("GET /admin/metrics", apiConfig.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiConfig.resetHandler)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	mux.HandleFunc("POST /api/chirps", apiConfig.postNewChirpHandler)
+	mux.HandleFunc("GET /api/chirps", apiConfig.getChirpsHandler)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiConfig.getChirpByIdHandler)
 	mux.HandleFunc("POST /api/users", apiConfig.newUserHandler)
+	mux.HandleFunc("POST /api/login", apiConfig.loginHandler)
 
 	server := http.Server{
 		Addr:    ":8080",
