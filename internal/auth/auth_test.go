@@ -33,3 +33,13 @@ func TestGetBearerToken(t *testing.T) {
 		t.Fatal("Did not get correct auth token:", token)
 	}
 }
+
+func TestMakeRefreshToken(t *testing.T) {
+	token, err := MakeRefreshToken()
+	if err != nil {
+		t.Fatal("Could not generate refresh token")
+	}
+	if len(token) != 64 {
+		t.Fatal("Token wrong length")
+	}
+}

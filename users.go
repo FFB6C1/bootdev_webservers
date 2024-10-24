@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -13,17 +14,17 @@ import (
 )
 
 type userRequest struct {
-	Email            string `json:"email"`
-	Password         string `json:"password"`
-	ExpiresInSeconds int    `json:"expires_in_seconds"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type newUserResponse struct {
-	Id        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	Id           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 func (cfg *apiConfig) newUserHandler(writer http.ResponseWriter, request *http.Request) {
@@ -83,12 +84,7 @@ func (cfg *apiConfig) loginHandler(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
-	var expirationTime time.Duration
-	if userRequest.ExpiresInSeconds == 0 {
-		expirationTime = time.Duration(1) * time.Hour
-	} else {
-		expirationTime = time.Duration(userRequest.ExpiresInSeconds) * time.Second
-	}
+	expirationTime := time.Duration(1) * time.Hour
 
 	token, err := auth.MakeJWT(user.ID, cfg.secret, expirationTime)
 	if err != nil {
@@ -96,7 +92,23 @@ func (cfg *apiConfig) loginHandler(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
-	responseJSON, err := makeUserResponseWithToken(user, token)
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		handleError("Could not make auth token", err, 500, writer)
+		return
+	}
+
+	refreshTokenParams := database.AddRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().AddDate(0, 0, 60),
+	}
+	if err := cfg.db.AddRefreshToken(request.Context(), refreshTokenParams); err != nil {
+		handleError("could not make refresh token", err, 500, writer)
+		return
+	}
+
+	responseJSON, err := makeUserResponseWithToken(user, token, refreshToken)
 	if err != nil {
 		handleError("could not make response", err, 500, writer)
 		return
@@ -104,7 +116,48 @@ func (cfg *apiConfig) loginHandler(writer http.ResponseWriter, request *http.Req
 
 	writer.WriteHeader(200)
 	writer.Write(responseJSON)
+}
 
+func (cfg *apiConfig) refreshHandler(writer http.ResponseWriter, request *http.Request) {
+	token, err := auth.GetBearerToken(request.Header)
+	if err != nil {
+		handleError("Couldn't get token from header", nil, 401, writer)
+		return
+	}
+	tokenFull, err := cfg.db.GetToken(request.Context(), token)
+	if err != nil {
+		handleError("Token does not exist", err, 401, writer)
+		return
+	}
+	if err := checkTokenValid(tokenFull); err != nil {
+		handleError("Token invalid", err, 401, writer)
+		return
+	}
+
+	newToken, err := auth.MakeJWT(tokenFull.UserID, cfg.secret, time.Hour)
+	if err != nil {
+		handleError("Could not make token", err, 500, writer)
+		return
+	}
+
+	response, err := makeTokenResponse(newToken)
+	if err != nil {
+		handleError("Could not make response", err, 500, writer)
+		return
+	}
+	writer.WriteHeader(200)
+	writer.Write(response)
+}
+
+func (cfg *apiConfig) revokeHandler(writer http.ResponseWriter, request *http.Request) {
+	token, err := auth.GetBearerToken(request.Header)
+	if err != nil {
+		handleError("Could not get token from header", err, 401, writer)
+	}
+	if err := cfg.db.RevokeToken(request.Context(), token); err != nil {
+		handleError("Could not revoke token", err, 401, writer)
+	}
+	writer.WriteHeader(204)
 }
 
 func makeUserResponse(user database.User) ([]byte, error) {
@@ -121,17 +174,39 @@ func makeUserResponse(user database.User) ([]byte, error) {
 	return responseJson, nil
 }
 
-func makeUserResponseWithToken(user database.User, token string) ([]byte, error) {
+func makeUserResponseWithToken(user database.User, token string, refreshToken string) ([]byte, error) {
 	responseStruct := newUserResponse{
-		Id:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-		Token:     token,
+		Id:           user.ID,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Email:        user.Email,
+		Token:        token,
+		RefreshToken: refreshToken,
 	}
 	responseJson, err := json.Marshal(responseStruct)
 	if err != nil {
 		return []byte(""), err
 	}
 	return responseJson, nil
+}
+
+func makeTokenResponse(token string) ([]byte, error) {
+	responseStruct := newUserResponse{
+		Token: token,
+	}
+	responseJson, err := json.Marshal(responseStruct)
+	if err != nil {
+		return []byte(""), err
+	}
+	return responseJson, nil
+}
+
+func checkTokenValid(token database.RefreshToken) error {
+	if time.Now().After(token.ExpiresAt) {
+		return fmt.Errorf("Token Expired")
+	}
+	if token.RevokedAt.Valid {
+		return fmt.Errorf("Token Revoked")
+	}
+	return nil
 }
