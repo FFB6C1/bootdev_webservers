@@ -41,18 +41,18 @@ func (cfg *apiConfig) postNewChirpHandler(writer http.ResponseWriter, request *h
 
 	token, err := auth.GetBearerToken(request.Header)
 	if err != nil {
-		handleError("Couldn't get token from header", nil, 401, writer)
+		handleError("Couldn't get token from header", err, 401, writer)
+		return
 	}
 
 	tokenUUID, err := auth.ValidateJWT(token, cfg.secret)
 	if err != nil {
 		handleError("Unauthorized", err, 401, writer)
+		return
 	}
 
 	if !checkChirpLength(chirp.Body) {
-		log.Printf("Chirp is too long.")
-		handleError("Error writing response", nil, 400, writer)
-
+		handleError("Chirp too long", nil, 400, writer)
 		return
 	}
 
@@ -65,14 +65,12 @@ func (cfg *apiConfig) postNewChirpHandler(writer http.ResponseWriter, request *h
 
 	addedChirp, err := cfg.db.CreateChirp(request.Context(), chirpToAdd)
 	if err != nil {
-		log.Printf("Error creating chirp: %s", err)
 		handleError("Error creating chirp", err, 500, writer)
 		return
 	}
 
 	response, err := makeChirpJSON(addedChirp)
 	if err != nil {
-		log.Printf("Error creating response: %s", err)
 		handleError("Error creating response", err, 500, writer)
 		return
 	}
@@ -111,7 +109,7 @@ func (cfg *apiConfig) getChirpByIdHandler(writer http.ResponseWriter, request *h
 	}
 	chirp, err := cfg.db.GetChirpById(request.Context(), idUUID)
 	if err != nil {
-		handleError("Couldn't find chirp", err, 500, writer)
+		handleError("Couldn't find chirp", err, 404, writer)
 		return
 	}
 
@@ -123,6 +121,44 @@ func (cfg *apiConfig) getChirpByIdHandler(writer http.ResponseWriter, request *h
 
 	writer.WriteHeader(200)
 	writer.Write(chirpJSON)
+}
+
+func (cfg *apiConfig) deleteChirpByIdHandler(writer http.ResponseWriter, request *http.Request) {
+	token, err := auth.GetBearerToken(request.Header)
+	if err != nil {
+		handleError("Couldn't get token from header", err, 401, writer)
+		return
+	}
+
+	tokenUUID, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		handleError("Unauthorized", err, 401, writer)
+		return
+	}
+
+	chirpID, err := uuid.Parse(request.PathValue("chirpID"))
+	if err != nil {
+		handleError("Could not parse chirp ID", err, 400, writer)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirpById(request.Context(), chirpID)
+	if err != nil {
+		handleError("Could not find chirp", err, 404, writer)
+		return
+	}
+
+	if tokenUUID != chirp.UserID {
+		handleError("Unauthorized", nil, 403, writer)
+		return
+	}
+
+	if err := cfg.db.DeleteChirp(request.Context(), chirp.ID); err != nil {
+		handleError("Could not delete chirp", err, 500, writer)
+		return
+	}
+
+	writer.WriteHeader(204)
 }
 
 func checkChirpLength(text string) bool {

@@ -25,6 +25,7 @@ type newUserResponse struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
 }
 
 func (cfg *apiConfig) newUserHandler(writer http.ResponseWriter, request *http.Request) {
@@ -160,12 +161,61 @@ func (cfg *apiConfig) revokeHandler(writer http.ResponseWriter, request *http.Re
 	writer.WriteHeader(204)
 }
 
+func (cfg *apiConfig) updateEmailPasswordHandler(writer http.ResponseWriter, request *http.Request) {
+	token, err := auth.GetBearerToken(request.Header)
+	if err != nil {
+		handleError("Could not get token from header", err, 401, writer)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		handleError("Could not validate token", err, 401, writer)
+		return
+	}
+
+	userParams := userRequest{}
+	decoder := json.NewDecoder(request.Body)
+	if err := decoder.Decode(&userParams); err != nil {
+		handleError("Could not read request", err, 400, writer)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(userParams.Password)
+	if err != nil {
+		handleError("Could not hash password", err, 500, writer)
+		return
+	}
+
+	updateEmailPasswordParams := database.UpdateUserEmailAndPasswordParams{
+		ID:             userID,
+		Email:          userParams.Email,
+		HashedPassword: hashedPassword,
+	}
+
+	user, err := cfg.db.UpdateUserEmailAndPassword(request.Context(), updateEmailPasswordParams)
+	if err != nil {
+		handleError("Could not update email and password", err, 500, writer)
+		return
+	}
+
+	userJson, err := makeUserResponse(user)
+	if err != nil {
+		handleError("Could not make response - database updated", err, 500, writer)
+		return
+	}
+
+	writer.WriteHeader(200)
+	writer.Write(userJson)
+}
+
 func makeUserResponse(user database.User) ([]byte, error) {
 	responseStruct := newUserResponse{
-		Id:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		Id:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 	responseJson, err := json.Marshal(responseStruct)
 	if err != nil {
@@ -182,6 +232,7 @@ func makeUserResponseWithToken(user database.User, token string, refreshToken st
 		Email:        user.Email,
 		Token:        token,
 		RefreshToken: refreshToken,
+		IsChirpyRed:  user.IsChirpyRed,
 	}
 	responseJson, err := json.Marshal(responseStruct)
 	if err != nil {
